@@ -1,0 +1,248 @@
+---
+title: "Read Milling and Baking Data Reports"
+author: "Jeanette Lyerly"
+date: '2024-04-09'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+The overall goal of this project is to create a training population for GS for milling and baking.
+
+We have data from past years and nurseries with data. This data is formatted in a specific way from the milling and baking reports. 
+I have data from the milling and baking test lab, as well as some data from individual breeders. Some of this data may overlap.
+
+## Acknowledgements
+
+USDA-ARS Soft Wheat Quality Laboratory for performing the milling and baking quality evaluations and summarizing/curating the data; breeders actively participating in those Regional Uniform Nurseries.   
+
+## Reading data
+
+Each xlsx file has a tab/sheet with multiple tables. The sheet is titled "Analysis Data".   
+There is a header at the top with merged cells.   
+The year is in row 3, which has merged cells.   
+Cell A5 has the name of the nursery, unless it's for an individual program in which case this cell says "Quality Samples" - sometimes a program name is given.    
+The first data table starts on row 8 - designated as "Quality Data".  
+After the first table there are some notes and sometimes tables with scales.    
+In some sheets there is a "Number of Standard Deviations Away from the Check" table. This seems to only be provided in sheets for individual programs and isn't really useful for training.    
+At the end there is a "Rankings/Grade Summary" table. Some of this information is included in the "Quality Data" table but not all of it, so we need some data out of here. This table seems to have the standardized values based on the scales in the sheet - which may differ by year.
+
+I think what we need out of this data is the "Quality Data" and the "Rankings/Grade Summary" table. 
+
+The number of rows is dependent on the number of entries in the test.
+
+All of these follow the same format. Reformatting all these files by hand will take a long time and isn't the best.
+
+## Purpose
+
+The purpose of this script is to read in these excel files, get the two data tables that we want out of them, and bind them into one table we can use. We also need to clean up these column names and add variables for the test/nursery and year. Some nurseries also need to have reps assigned since they were submitted by more than one program in the same year.
+
+
+```{r load packages}
+
+library(tidyverse)
+library(janitor)
+library(here)
+library(readxl)
+
+```
+
+
+## Import data
+
+We need to work on importing this data. There are multiple folders and some data may be the same.
+We will create a list of the files we have in each folder, then import them into individual data frames. This seems the simplest. We need to figure out how to parse these.   
+
+Folders:   
+2023A05 UGA USSRWWN.  
+GAWN - these are all in the folder above.  
+KY TP.  
+MDX - I need this file - 2014A01 Mason-Dixon Regional Nursery, the rest are already in the other folder.  
+USS - need the 2017 data - have the rest in the other folder.   
+
+Create a folder called "Milling_Baking_Data" with all the data sets from the regional nurseries - no duplicates.  
+
+Some of these have overlapping data sets based on what was sent from the quality lab. Start with the data that came from the quality lab.
+
+This is going to give a bunch of "New names" warnings since we are reading in from the top.
+
+```{r load data}
+
+#to read in as a list of data frames
+#If the path is different than your working directory
+# you'll need to set full.names = TRUE to get the full paths
+my_files <- list.files(path = here::here("Milling_baking_data"), pattern = '*.xlsx', full.names = TRUE)
+
+#Further arguments to read_excel can be passed in
+#I need to get some data out of the cells at the top of these reports
+#read in with no headers
+#missing data is blank
+all_xlsx <- lapply(my_files, read_excel, na = c("", ".", "NA"), col_names=FALSE)
+
+# Set the name of each list element to its respective file name 
+# Note full.names = FALSE to get only the file names, not the full path
+# Clean them up with make_clean_names
+names(all_xlsx) <- gsub(".xlsx","",
+                       list.files(here::here("Milling_baking_data"), pattern = '*.xlsx', full.names = FALSE),
+                       fixed = TRUE) %>%
+                    janitor::make_clean_names()
+  
+
+```
+
+## Parse the data
+
+The following function will extract the tables we want, put them together, add the year and test information.
+
+Working on this data I have noted that the lab number is not always the same for the quality and rankings/grade data so I need to keep those as variables. Most of the time they are identical but in at least one case they are not. These will be designated as:
+
+lab_numberQ = Quality.  
+lab_numberR = Rankings.  
+
+```{r}
+
+#put this whole thing in a function
+dat_extract_format = function(df){
+  df <- df
+  
+  #extract the year and the test information
+  #from the formatting year should be in 1,1 and test in 3,1
+  #we are getting the 4 numbers out for the year and whatever has been designated as the test name
+  thisYear <- as.numeric(sub(".*(\\d{4}).*", "\\1", df[3,1]))
+  thisTest <- as.character(df[5,1])
+  
+  #find the start for the quality and rankings data
+  quality_start <- which(Reduce(`|`, lapply(df, grepl, pattern = "Quality Data"))) + 1 #correct
+  rankings_start <- which(Reduce(`|`, lapply(df, grepl, pattern = "Rankings/Grade Summary"))) + 1 #correct
+  
+  #split the data into the quality set and the rankings sets based on the start rows
+  #trim the quality table based on the where the table ends
+  #remove empty columns
+  #add some column names
+  #clean up these names
+  v <- c(quality_start, rankings_start)
+  dat_split <- split(df, cumsum(1:nrow(df) %in% (v)))
+  #quality split
+  dat1 <- as.data.frame(dat_split[2])
+  quality_end <- which(is.na(dat1[,1]))
+  quality_end <- quality_end[1] - 1
+  dat1 <- dat1[1:quality_end,]
+  dat1 <- janitor::remove_empty(dat1, which = "cols")
+  dat1 <- janitor::row_to_names(dat1, row_number = 1)
+  dat1 <- clean_names(dat1)
+  dat1 <- dat1 %>%
+    rename(lab_numberQ = lab_number)
+  #rankings split
+  dat2 <- as.data.frame(dat_split[3])
+  dat2 <- janitor::remove_empty(dat2, which = "cols")
+  dat2 <- janitor::row_to_names(dat2, row_number = 1)
+  dat2 <- clean_names(dat2)
+  dat2 <- dat2 %>%
+    rename(lab_numberR = lab_number)
+
+  #merge the quality and rankings dfs
+  datall <- full_join(dat1, dat2)
+  
+  #change variables to numeric
+  #some entry numbers are NOT numeric - add an id value for sorting
+  #top_grade should be numeric
+  #round
+  datall <- datall %>%
+    mutate(entry_id = row_number()) %>%
+    mutate(across(-c(matches("grade|entry")), ~as.numeric(.))) %>%
+    mutate(across(matches("top"), ~as.numeric(.))) %>%
+    mutate(across(where(is.numeric), \(x) round(x, 2)))
+  
+  #add the test and the year and reorganize
+  datall <- datall %>%
+    mutate(year = thisYear, expt_label = thisTest)
+  datall <- datall %>%
+    dplyr::select(lab_numberQ, lab_numberR, year, expt_label, entry_number, entry, everything())
+  
+  #capitalize all the entry names
+  #change any underscores, spaces, stars, and pound signs to dash
+  datall <- datall %>%
+    mutate_at(vars(entry), list(entry = ~toupper(.))) %>%
+    mutate(entry = gsub("_| |\\*|#", "-", entry))
+  
+  df <- datall
+  
+  return(df)
+}
+
+
+```
+
+### Apply this function
+
+Apply this to my data frames. Bind the results.
+
+
+```{r}
+
+#apply the function to the data frames
+results <- lapply(all_xlsx, dat_extract_format)
+
+#bind the data 
+#use the df name as a variable to keep track of which file this is
+results_df <- bind_rows(results, .id = 'id')
+
+```
+
+### Further cleaning and formatting
+
+I need to fix this expt_label variable since the names in the sheets sometimes include a program name - e.g the GAWN may have been submitted by two programs in the same year - we want these to be reps in the data.
+
+Find the number of reps based on the number of times the nursery was submitted and assign rep numbers.
+
+Move descriptors to the beginning.
+
+```{r}
+#add and expt variable baseed on the name in the file
+results_df <- results_df %>%
+  mutate(expt = ifelse(str_detect(expt_label, "GAWN"), "GAWN",
+                       ifelse(str_detect(expt_label, "USSRWWN"), "USSRWWN",
+                              ifelse(str_detect(expt_label, "Mason-Dixon"), "MDXN",
+                                     ifelse(str_detect(expt_label, "UK"), "KY", NA)))))
+#find reps in the data
+no_reps <- results_df %>%
+  dplyr::select(year, expt_label, expt, id) %>%
+  dplyr::filter(!duplicated(.)) %>%
+  group_by(year, expt) %>%
+  mutate(rep = row_number())
+
+#join the rep information
+results_df <- results_df %>%
+  left_join(., no_reps)
+
+#reorganize
+results_df <- results_df %>%
+  dplyr::select(id, lab_numberQ, lab_numberR, year, expt_label, expt, rep, entry_id, entry_number, entry, everything()) %>%
+  arrange(year, expt, rep, entry_id)
+
+
+```
+
+### Export
+
+Write this out to a file.
+
+```{r}
+
+write.csv(results_df, file = "milling_baking_dataset.csv", row.names = F)
+
+```
+
+
+```{r}
+
+sessionInfo()
+
+knitr::knit_exit()
+
+```
+
